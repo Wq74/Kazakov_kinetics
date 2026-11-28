@@ -1,7 +1,8 @@
 import numpy as np
 
 from fitting import (
-    FIT_MODELS, aicc_bic, concentration_to_percent, fit_all_models, r_squared,
+    FIT_MODELS, aicc_bic, concentration_to_percent, fit_all_models,
+    fit_one_model, r_squared,
 )
 from models import MODELS
 
@@ -18,6 +19,21 @@ def check_cap():
     assert np.isfinite(best["errors"]["k0"])
     assert MODELS["Zero order"]["func"](t, k0)[-1] > 100
     assert y[-1] == 100
+
+
+# A flat curve can hide a rate even when its plateau is well determined.
+def check_parameter_errors():
+    t = np.arange(1, 9, dtype=float) * 100
+    y = np.full(len(t), 100.0)
+    result = fit_one_model("Zero order (capped)", t, y)
+    assert np.isnan(result["errors"]["k0"])
+
+    t = t * 1000
+    y = np.array([88, 91, 90, 89, 90, 91, 89, 90], dtype=float)
+    result = fit_one_model("First order", t, y)
+    assert np.isclose(result["params"]["Fmax"], np.mean(y))
+    assert np.isfinite(result["errors"]["Fmax"])
+    assert np.isnan(result["errors"]["k1"])
 
 
 # Check the concentration conversion and the undefined scores.
@@ -37,9 +53,13 @@ def check_limits():
 
     y = np.array([2.0, 2.0])
     assert np.isnan(r_squared(y, y))
-    assert np.isinf(aicc_bic(y, y, 1)[0])
+    y = np.array([0.0, 1.0, 2.0, 3.0])
+    aicc, bic = aicc_bic(y, y + 1, 1)
+    assert np.isclose(aicc, 16.0)
+    assert np.isclose(bic, 2 * np.log(4))
+    assert np.isinf(aicc_bic(y[:3], y[:3] + 1, 1)[0])
     try:
-        fit_all_models([0, 1], y)
+        fit_all_models([0, 1, 2], y[:3])
     except RuntimeError:
         pass
     else:
@@ -78,6 +98,7 @@ def check_models():
 
 if __name__ == "__main__":
     check_cap()
+    check_parameter_errors()
     check_limits()
     print("Checks passed")
     check_models()
