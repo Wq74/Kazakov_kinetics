@@ -59,9 +59,10 @@ def r_squared(y, y_fit):
     return 1 - ss_res / ss_tot
 
 
-# Count the fitted curve coefficients in the information criteria.
+# Count the curve coefficients and the residual variance.
 def aicc_bic(y, y_fit, k):
     n = len(y)
+    k += 1
     rss = max(np.sum((y - y_fit) ** 2), 1e-12)
 
     score = n * np.log(rss / n)
@@ -72,16 +73,54 @@ def aicc_bic(y, y_fit, k):
     return aicc, bic
 
 
+# Check whether small changes in the coefficients can be told apart.
+def parameter_errors(model, t, params, cov, capped):
+    func = model["func"]
+    sensitivity = np.empty((len(t), len(params)))
+    step_size = np.cbrt(np.finfo(float).eps)
+
+    for i, value in enumerate(params):
+        step = step_size * max(abs(value), 1.0)
+        below = params.copy()
+        above = params.copy()
+        below[i] = max(value - step, model["low"][i])
+        above[i] = min(value + step, model["high"][i])
+        change = func(t, *above) - func(t, *below)
+        sensitivity[:, i] = change / (above[i] - below[i])
+
+    if capped:
+        sensitivity[func(t, *params) >= 100] = 0.0
+
+    errors = np.full(len(params), np.nan)
+    if not np.all(np.isfinite(sensitivity)):
+        return errors
+
+    scales = np.linalg.norm(sensitivity, axis=0)
+    scales[scales == 0] = 1.0
+    _, singular_values, directions = np.linalg.svd(
+        sensitivity / scales, full_matrices=False
+    )
+    tolerance = singular_values[0] * 1e-7
+    weak_directions = directions[singular_values <= tolerance]
+    undetermined = np.any(np.abs(weak_directions) > 1e-6, axis=0)
+
+    variances = np.diag(cov)
+    usable = ~undetermined & np.isfinite(variances) & (variances >= 0)
+    errors[usable] = np.sqrt(variances[usable])
+    return errors
+
+
 # Fit one model and estimate parameter errors from the covariance matrix.
 def fit_one_model(name, t, y):
     model = FIT_MODELS[name]
     func = model["func"]
     k = len(model["params"])
-    if len(t) - k - 1 <= 0:
+    if len(t) <= k + 2:
         return None
 
     p0 = model["p0"]
-    if name.endswith(" (capped)"):
+    capped = name.endswith(" (capped)")
+    if capped:
         base = name.removesuffix(" (capped)")
         peak = np.max(MODELS[base]["func"](t, *p0))
         if peak >= 100:
@@ -105,7 +144,7 @@ def fit_one_model(name, t, y):
     if not np.isfinite(aicc):
         return None
 
-    errors = np.sqrt(np.diag(cov))
+    errors = parameter_errors(model, t, params, cov, capped)
     return {
         "model": name,
         "params": dict(zip(model["params"], params)),
@@ -157,7 +196,10 @@ def print_results(results):
         parts = []
         for name, value in result["params"].items():
             error = result["errors"][name]
-            parts.append(f"{name}={value:.4g} ± {error:.2g}")
+            if np.isfinite(error):
+                parts.append(f"{name}={value:.4g} ± {error:.2g}")
+            else:
+                parts.append(f"{name}={value:.4g} (SE unavailable)")
         p_text = ", ".join(parts)
         model = result["model"]
         print(f"{model:<30} {result['R2']:8.4f} {result['AICc']:9.2f} "
